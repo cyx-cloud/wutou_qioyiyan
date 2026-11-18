@@ -261,9 +261,36 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=1, sort_keys=True, ensure_ascii=False) + "\n")
 
 
+# ---------------------------------------------------------------- test mode
+
+def test_run() -> int:
+    """Real Codomo page, real map lookups, real WhatsApp, but state.json is not changed.
+    Sends what is listed right now, so I can compare it with the website."""
+    try:
+        homes, warnings = read_homes()
+    except Problem as p:
+        send(f"🧪 Test failed\n⚠️ {p.text}")
+        return 0
+    cheap = sorted([c for c in homes if c.rent is not None and c.rent <= MAX_RENT], key=lambda c: c.rent)
+    send("\n".join([f"🧪 Test, real data",
+                    f"{plural(len(homes), 'home')} listed now",
+                    f"{len(cheap)} with rent ≤ {euro(MAX_RENT)}"] + warnings))
+    places: dict = {}
+    if cheap:
+        for c in cheap[:2]:
+            send("🧪 Test\n" + home_text(c, places))
+    elif homes:
+        c = min(homes, key=lambda c: c.rent if c.rent is not None else 10**9)
+        send(f"🧪 Test, cheapest home\n(over {euro(MAX_RENT)}, only to show the format)\n"
+             + home_text(c, places))
+    return 0
+
+
 # ---------------------------------------------------------------- main
 
 def main() -> int:
+    if os.environ.get("TEST") == "true":
+        return test_run()
     state = load_state()
     now = datetime.now(timezone.utc)
     stamp = now.strftime("%Y-%m-%dT%H:%M")
