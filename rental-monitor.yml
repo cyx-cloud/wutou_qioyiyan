@@ -1,0 +1,78 @@
+name: Rental monitor
+
+# Started by cron-job.org through the GitHub API (no "schedule:", it runs hours late).
+on:
+  workflow_dispatch:
+    inputs:
+      attempt:
+        description: "Retry number (set by the workflow itself)"
+        required: false
+        default: "1"
+
+permissions:
+  contents: write   # commit state.json
+  actions: write    # restart itself on another server
+
+# never two runs at the same time (both would edit state.json)
+concurrency:
+  group: rental-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Can this server reach Codomo?
+        id: reach
+        run: |
+          code=$(curl -s -m 10 -o /dev/null -w "%{http_code}" \
+            -A "personal-rental-monitor/1.0 (one request per run)" \
+            "https://codomo.eu/homes/nl/en?city=eindhoven&publish_mode=direct_booking" || true)
+          echo "Codomo answered HTTP $code"
+          if [ "$code" = "200" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restart on another server
+        if: steps.reach.outputs.ok == 'false' && inputs.attempt != '4'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTEMPT: ${{ inputs.attempt }}
+        run: |
+          next=$(( ${ATTEMPT:-1} + 1 ))
+          echo "Codomo not reachable from this server, starting attempt $next"
+          gh workflow run "Rental monitor" --ref main -f attempt=$next
+
+      # runs when Codomo answered, or on the last attempt (then the script sends the ⚠️)
+      - uses: actions/setup-python@v5
+        if: steps.reach.outputs.ok == 'true' || inputs.attempt == '4'
+        with:
+          python-version: "3.12"
+
+      - name: Check for new homes
+        if: steps.reach.outputs.ok == 'true' || inputs.attempt == '4'
+        env:
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+        run: |
+          pip install --quiet requests
+          python rental_monitor.py
+
+      - name: Save seen homes
+        if: steps.reach.outputs.ok == 'true' || inputs.attempt == '4'
+        run: |
+          git config user.name "rental-monitor"
+          git config user.email "rental-monitor@users.noreply.github.com"
+          git add state.json
+          if git diff --cached --quiet; then
+            echo "state.json unchanged"
+          else
+            git commit -m "Update seen homes"
+            git pull --rebase
+            git push
+          fi
