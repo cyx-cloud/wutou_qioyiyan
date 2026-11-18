@@ -245,9 +245,15 @@ def home_text(c: codomo.Card, places: dict) -> str:
     else:
         lines.append(f"💶 {euro(c.rent)}/month")
         lines.append("⚠️ Service costs not found")
-    size = " · ".join(x for x in [f"{c.area} m²" if c.area else "", c.bedrooms_label] if x)
-    if size:
-        lines.append(f"📐 {size}")
+    if c.floor == "0":
+        floor = "ground floor"
+    elif c.floor:
+        floor = f"floor {c.floor}"
+    else:
+        floor = "⚠️ floor ?"
+    size = " · ".join(x for x in [f"{c.area} m²" if c.area else "⚠️ m² ?",
+                                  c.bedrooms_label or "⚠️ bedrooms ?", floor] if x)
+    lines.append(f"📐 {size}")
     lines.append(travel_line(c, places))
     if c.available_from:
         lines.append(f"📅 From {nice_day(c.available_from)}")
