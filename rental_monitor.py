@@ -162,12 +162,19 @@ def send(text: str) -> None:
         print(text)
         print("------------------------------")
         return
-    r = requests.get("https://api.callmebot.com/whatsapp.php",
-                     params={"phone": os.environ["WHATSAPP_PHONE"], "text": text,
-                             "apikey": os.environ["CALLMEBOT_APIKEY"]},
-                     timeout=30)
-    print(f"CallMeBot HTTP {r.status_code}: {r.text[:200]!r}")
-    if r.status_code != 200 or "APIKey is invalid" in r.text:
+    # The repo is public, so its Actions logs are public too. Never print the request URL or
+    # CallMeBot's answer: both can contain the phone number (URL-encoded, so GitHub's
+    # automatic *** masking of secrets would miss it).
+    try:
+        r = requests.get("https://api.callmebot.com/whatsapp.php",
+                         params={"phone": os.environ["WHATSAPP_PHONE"], "text": text,
+                                 "apikey": os.environ["CALLMEBOT_APIKEY"]},
+                         timeout=30)
+    except requests.RequestException as e:
+        raise RuntimeError(f"Can't reach CallMeBot ({type(e).__name__})") from None
+    ok = r.status_code == 200 and "APIKey is invalid" not in r.text
+    print(f"CallMeBot HTTP {r.status_code}, {'accepted' if ok else 'NOT accepted'}")
+    if not ok:
         raise RuntimeError("CallMeBot did not accept the message")
     time.sleep(3)   # CallMeBot drops messages sent too quickly after each other
 
