@@ -8,6 +8,11 @@ on:
         description: "Retry number (set by the workflow itself)"
         required: false
         default: "1"
+      test:
+        description: "Test: send what is listed now (real data, seen-list not changed)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write   # commit state.json
@@ -43,10 +48,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ATTEMPT: ${{ inputs.attempt }}
+          TEST: ${{ inputs.test }}
         run: |
           next=$(( ${ATTEMPT:-1} + 1 ))
           echo "Codomo not reachable from this server, starting attempt $next"
-          gh workflow run "Rental monitor" --ref main -f attempt=$next
+          gh workflow run "Rental monitor" --ref main -f attempt=$next -f test=${TEST:-false}
 
       # runs when Codomo answered, or on the last attempt (then the script sends the ⚠️)
       - uses: actions/setup-python@v5
@@ -59,6 +65,7 @@ jobs:
         env:
           WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          TEST: ${{ inputs.test }}
         run: |
           pip install --quiet requests
           python rental_monitor.py
