@@ -119,6 +119,41 @@ def read_homes() -> tuple[list[codomo.Card], list[str]]:
     return homes, warnings
 
 
+# ---------------------------------------------------------------- booking conditions
+
+def condition_lines(c: codomo.Card) -> list[str]:
+    """Who can book (students / employed), from the home's own page (one request per
+    home that gets a message; robots.txt allows home pages)."""
+    try:
+        local = os.environ.get("LOCAL_UNIT_HTML")
+        if local:
+            with gzip.open(local, "rt", encoding="utf-8") as f:
+                html = f.read()
+        else:
+            time.sleep(2)
+            html = get_page(SITE + c.path)
+        unit = codomo.parse_unit(html)
+    except (Problem, codomo.PageError) as e:
+        print(f"Unit page failed for {c.name}: {e}")
+        # the list card itself sometimes says "Students only"
+        return ["⚠️ Booking conditions unknown"] + [f"ℹ️ {t}" for t in c.tags]
+
+    who = set(unit.audience)
+    lines = []
+    if who == {"student"}:
+        lines.append("🎓 Students only")
+    elif who == {"employed"}:
+        lines.append("💼 Employed only")
+    elif who == {"student", "employed"}:
+        lines.append("👤 Students or employed")
+    elif who:
+        lines.append(f"👤 For: {', '.join(sorted(who))}")
+    else:
+        lines.append("⚠️ Who can book: not found")
+
+    return lines
+
+
 # ---------------------------------------------------------------- travel time to CS
 
 def geocode(street: str, city: str) -> tuple[float, float] | None:
@@ -218,8 +253,7 @@ def home_text(c: codomo.Card, places: dict) -> str:
         lines.append(f"📅 From {nice_day(c.available_from)}")
     if c.min_stay:
         lines.append(f"⏳ Min {c.min_stay}")
-    for t in c.tags:
-        lines.append(f"ℹ️ {t}")
+    lines += condition_lines(c)
     lines.append(f"{SITE}{c.path}")
     return "\n".join(lines)
 
