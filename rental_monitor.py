@@ -14,6 +14,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,14 @@ PAGE_SIZE = 25             # Codomo shows 25 homes per list page
 MAX_PAGES = 6
 STATE_FILE = Path(__file__).with_name("state.json")
 USER_AGENT = "personal-rental-monitor/1.0 (one request per run)"
+
+# Travel time to Eindhoven Centraal, free OpenStreetMap services, no API key:
+#   Nominatim (address -> coordinates), max 1 request per second
+#   routing.openstreetmap.de (FOSSGIS OSRM), bike and foot profiles
+EINDHOVEN_CS = (51.4434, 5.4797)   # lat, lon of the station entrance
+NOMINATIM = "https://nominatim.openstreetmap.org/search"
+ROUTER = "https://routing.openstreetmap.de/routed-{mode}/route/v1/{mode}/{a};{b}"
+GEO_USER_AGENT = "personal-rental-monitor/1.0 (travel time for a few homes per day)"
 
 
 class Problem(Exception):
@@ -110,6 +119,66 @@ def read_homes() -> tuple[list[codomo.Card], list[str]]:
     return homes, warnings
 
 
+# ---------------------------------------------------------------- travel time to CS
+
+def geocode(street: str, city: str) -> tuple[float, float] | None:
+    time.sleep(1.1)    # Nominatim: max 1 request per second
+    r = requests.get(NOMINATIM, params={"street": street, "city": city, "country": "Netherlands",
+                                        "format": "jsonv2", "limit": 1},
+                     headers={"User-Agent": GEO_USER_AGENT}, timeout=20)
+    r.raise_for_status()
+    hits = r.json()
+    if not hits:
+        return None
+    return float(hits[0]["lat"]), float(hits[0]["lon"])
+
+
+def find_place(c: codomo.Card, places: dict) -> dict:
+    """Coordinates of a home, cached in state.json so each address is looked up once.
+    "rough" = only the street was found, not the house number."""
+    key = f"{c.name}, {c.city or 'Eindhoven'}"
+    if key in places:
+        return places[key]
+    city = c.city or "Eindhoven"
+    place = {"lat": None, "lon": None, "rough": False}
+    point = geocode(c.name, city)
+    if point is None:
+        # "Boschdijk 293B" or "Kastanjelaan 1-18" may be unknown: try the street alone
+        street = re.sub(r"\s+\d.*$", "", c.name).strip()
+        if street and street != c.name:
+            point = geocode(street, city)
+            place["rough"] = point is not None
+    if point is not None:
+        place["lat"], place["lon"] = point
+        places[key] = place     # only cache successes, so a failure is retried next time
+    return place
+
+
+def minutes_to_cs(lat: float, lon: float, mode: str) -> int:
+    url = ROUTER.format(mode=mode, a=f"{lon},{lat}", b=f"{EINDHOVEN_CS[1]},{EINDHOVEN_CS[0]}")
+    r = requests.get(url, params={"overview": "false"},
+                     headers={"User-Agent": GEO_USER_AGENT}, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("code") != "Ok" or not data.get("routes"):
+        raise ValueError(f"router answered {data.get('code')}")
+    return max(1, round(data["routes"][0]["duration"] / 60))
+
+
+def travel_line(c: codomo.Card, places: dict) -> str:
+    try:
+        place = find_place(c, places)
+        if place["lat"] is None:
+            return "⚠️ Address not found on map"
+        bike = minutes_to_cs(place["lat"], place["lon"], "bike")
+        walk = minutes_to_cs(place["lat"], place["lon"], "foot")
+    except (requests.RequestException, ValueError, KeyError) as e:
+        print(f"Travel time failed for {c.name}: {type(e).__name__} {e}")
+        return "⚠️ Time to CS unknown"
+    rough = "≈" if place["rough"] else ""
+    return f"🚲 {rough}{bike} min · 🚶 {rough}{walk} min to CS"
+
+
 # ---------------------------------------------------------------- message text
 
 def euro(x: float | None) -> str:
@@ -129,7 +198,7 @@ def nice_day(iso: str) -> str:
         return iso or "?"
 
 
-def home_text(c: codomo.Card) -> str:
+def home_text(c: codomo.Card, places: dict) -> str:
     lines = [f"🏠 {c.name or c.key}"]
     if c.building:
         lines.append(f"🏢 {c.building}")
@@ -144,6 +213,7 @@ def home_text(c: codomo.Card) -> str:
     size = " · ".join(x for x in [f"{c.area} m²" if c.area else "", c.bedrooms_label] if x)
     if size:
         lines.append(f"📐 {size}")
+    lines.append(travel_line(c, places))
     if c.available_from:
         lines.append(f"📅 From {nice_day(c.available_from)}")
     if c.min_stay:
@@ -229,7 +299,7 @@ def main() -> int:
 
     sent = []
     for c in cheap[:MAX_HOME_MESSAGES]:
-        send(("🆕 New home\n" if not first_run else "") + home_text(c))
+        send(("🆕 New home\n" if not first_run else "") + home_text(c, state.setdefault("places", {})))
         sent.append(c)
     later = cheap[len(sent):]   # not marked as seen, so they come in the next runs
     extra_lines = []
