@@ -122,8 +122,8 @@ def read_homes() -> tuple[list[codomo.Card], list[str]]:
 # ---------------------------------------------------------------- booking conditions
 
 def condition_lines(c: codomo.Card) -> list[str]:
-    """Who can book (students / employed), from the home's own page (one request per
-    home that gets a message; robots.txt allows home pages)."""
+    """Who can book (students / employed) and the energy label, from the home's own page
+    (one request per home that gets a message; robots.txt allows home pages)."""
     try:
         local = os.environ.get("LOCAL_UNIT_HTML")
         if local:
@@ -151,7 +151,21 @@ def condition_lines(c: codomo.Card) -> list[str]:
     else:
         lines.append("⚠️ Who can book: not found")
 
+    label = energy_label(html)
+    lines.append(f"⚡ Energy label {label}" if label else "⚠️ Energy label not found")
     return lines
+
+
+def energy_label(html: str) -> str | None:
+    """The value shown next to "Energy label" on the home page, e.g. "A+" or "C"."""
+    text = html.replace('\\"', '"')
+    i = text.find('"children":"Energy label"')
+    if i < 0:
+        return None
+    m = re.search(r'"children":"([^"]{1,6})"', text[i + 25:i + 600])
+    if m and re.fullmatch(r"[A-G]\+{0,5}", m.group(1)):
+        return m.group(1)
+    return None
 
 
 # ---------------------------------------------------------------- travel time to CS
@@ -289,6 +303,40 @@ def send(text: str) -> None:
     time.sleep(3)   # CallMeBot drops messages sent too quickly after each other
 
 
+def call(text: str) -> str | None:
+    """Telegram voice call through CallMeBot (free). Returns a problem text, or None if OK.
+    Needs secret TELEGRAM_USER (@username) and /start sent once to @CallMeBot_txtbot."""
+    user = os.environ.get("TELEGRAM_USER", "").strip()
+    if not user:
+        return "no TELEGRAM_USER secret"
+    if not user.startswith(("@", "+")):
+        user = "@" + user
+    text = text[:250]    # CallMeBot cuts at 256 characters
+    if os.environ.get("DRY_RUN") == "1":
+        print(f"----- Telegram call (dry run) -----\n{text}\n-----------------------------------")
+        return None
+    # Never print the URL or the answer: they contain the username (public logs).
+    try:
+        r = requests.get("https://api.callmebot.com/start.php",
+                         params={"user": user, "text": text, "rpt": 2, "cc": "no",
+                                 "timeout": 30},
+                         timeout=60)
+    except requests.RequestException as e:
+        return f"can't reach CallMeBot ({type(e).__name__})"
+    print(f"Telegram call: CallMeBot HTTP {r.status_code}")
+    if r.status_code != 200:
+        return f"CallMeBot answered HTTP {r.status_code}"
+    return None
+
+
+def call_text(homes: list[codomo.Card]) -> str:
+    first = homes[0]
+    rent = f", {first.rent:.0f} euro" if first.rent is not None else ""
+    if len(homes) == 1:
+        return f"New Codomo home. {first.name}{rent}. Check WhatsApp."
+    return f"{len(homes)} new Codomo homes. For example {first.name}{rent}. Check WhatsApp."
+
+
 # ---------------------------------------------------------------- state
 
 def load_state() -> dict:
@@ -323,6 +371,10 @@ def test_run() -> int:
         c = min(homes, key=lambda c: c.rent if c.rent is not None else 10**9)
         send(f"🧪 Test, cheapest home\n(over {euro(MAX_RENT)}, only to show the format)\n"
              + home_text(c, places))
+    problem = call("This is a test call from your rental monitor. "
+                   + (call_text(cheap[:2]) if cheap else "No homes under budget right now."))
+    send("🧪 Telegram call sent, did it ring?" if not problem
+         else f"🧪 ⚠️ Telegram call failed\n{problem}")
     return 0
 
 
@@ -376,6 +428,13 @@ def main() -> int:
         extra_lines.append(f"➕ {plural(len(pricey), 'new home')} over {euro(MAX_RENT)}")
     if extra_lines:
         send("\n".join(extra_lines + [LIST_URL]))
+
+    # one Telegram call per run, after the WhatsApp details are there (not on the first run)
+    if sent and not first_run:
+        problem = call(call_text(sent))
+        if problem:
+            print(f"Telegram call failed: {problem}")
+            send(f"⚠️ Telegram call failed\n{problem}")
 
     # only mark homes as seen once the messages went out
     state["started"] = True
