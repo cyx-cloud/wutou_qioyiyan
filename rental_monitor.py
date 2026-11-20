@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -415,11 +416,22 @@ def main() -> int:
                 f"{len(homes)} homes listed now",
                 f"{len(cheap)} with rent ≤ {euro(MAX_RENT)}"]
         send("\n".join(head + warnings))
-    elif warnings and new:
+
+    # CALL FIRST, before the slower work (home pages, map lookups, WhatsApp).
+    # The call runs in the background: CallMeBot may wait while the phone rings, and the
+    # WhatsApp details should not wait for that.
+    to_send = cheap[:MAX_HOME_MESSAGES]
+    call_result: dict = {}
+    caller = None
+    if to_send and not first_run:
+        caller = threading.Thread(target=lambda: call_result.update(problem=call(call_text(to_send))))
+        caller.start()
+
+    if warnings and new and not first_run:
         send("\n".join(["Rental monitor"] + warnings))
 
     sent = []
-    for c in cheap[:MAX_HOME_MESSAGES]:
+    for c in to_send:
         send(("🆕 New home\n" if not first_run else "") + home_text(c, state.setdefault("places", {})))
         sent.append(c)
     later = cheap[len(sent):]   # not marked as seen, so they come in the next runs
@@ -431,9 +443,9 @@ def main() -> int:
     if extra_lines:
         send("\n".join(extra_lines + [LIST_URL]))
 
-    # one Telegram call per run, after the WhatsApp details are there (not on the first run)
-    if sent and not first_run:
-        problem = call(call_text(sent))
+    if caller is not None:
+        caller.join(timeout=90)
+        problem = call_result.get("problem", "no answer from CallMeBot in time")
         if problem:
             print(f"Telegram call failed: {problem}")
             send(f"⚠️ Telegram call failed\n{problem}")
@@ -443,7 +455,7 @@ def main() -> int:
     # Homes waiting for the next run ("later") are left out, so they still come.
     state["started"] = True
     later_keys = {c.key for c in later}
-    listed_now = {c.key: seen.get(c.key) or {"first": stamp, "name": c.name}
+    listed_now = {c.key: {"first": (seen.get(c.key) or {}).get("first", stamp), "name": c.name}
                   for c in homes if c.key not in later_keys}
     if any(w.startswith("⚠️ Page says") for w in warnings):
         # I may have read only part of the page: don't drop homes now, or they would
