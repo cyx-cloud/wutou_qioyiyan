@@ -1,8 +1,9 @@
 """Codomo rental monitor: WhatsApp me (CallMeBot) when a new home appears.
 
-Reads the Codomo list page in LIST_URL, keeps the homes it has already seen in
+Reads the Codomo list page in LIST_URL, keeps the homes listed right now in
 state.json (committed back to the repo by the workflow), and sends one WhatsApp
-message per new home with basic rent <= MAX_RENT.
+message per new home with basic rent <= MAX_RENT. A home that disappears and comes
+back later counts as new again.
 
 Env:
   WHATSAPP_PHONE, CALLMEBOT_APIKEY   CallMeBot (required unless DRY_RUN=1)
@@ -17,7 +18,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -28,7 +29,6 @@ LIST_URL = "https://codomo.eu/homes/nl/en?city=eindhoven&publish_mode=direct_boo
 SITE = "https://codomo.eu"
 MAX_RENT = 1200            # basic rent, without service costs
 MAX_HOME_MESSAGES = 5      # per run; more new homes -> one summary line
-FORGET_AFTER_DAYS = 30     # drop homes from state.json when gone this long
 PAGE_SIZE = 25             # Codomo shows 25 homes per list page
 MAX_PAGES = 6
 STATE_FILE = Path(__file__).with_name("state.json")
@@ -95,6 +95,8 @@ def read_homes() -> tuple[list[codomo.Card], list[str]]:
         try:
             cards, counts = codomo.parse_list(html)
         except codomo.PageError as e:
+            # keep the page so the workflow can upload it, to see what Codomo changed
+            Path(__file__).with_name("debug_page.html").write_text(html, encoding="utf-8")
             raise Problem("changed", f"Codomo changed its page layout ({e})")
         new = 0
         for c in cards:
@@ -436,17 +438,19 @@ def main() -> int:
             print(f"Telegram call failed: {problem}")
             send(f"⚠️ Telegram call failed\n{problem}")
 
-    # only mark homes as seen once the messages went out
+    # state.json keeps only the homes listed right now. A home that disappears is dropped,
+    # so if it comes back later it counts as new and I get a message again.
+    # Homes waiting for the next run ("later") are left out, so they still come.
     state["started"] = True
     later_keys = {c.key for c in later}
-    for c in homes:
-        if c.key in later_keys:
-            continue
-        # "last" is a day, so state.json (and the repo) changes at most once a day per home
-        seen.setdefault(c.key, {"first": stamp, "name": c.name})["last"] = now.strftime("%Y-%m-%d")
-    cutoff = (now - timedelta(days=FORGET_AFTER_DAYS)).strftime("%Y-%m-%d")
-    for k in [k for k, v in seen.items() if v.get("last", "") < cutoff]:
-        del seen[k]
+    listed_now = {c.key: seen.get(c.key) or {"first": stamp, "name": c.name}
+                  for c in homes if c.key not in later_keys}
+    if any(w.startswith("⚠️ Page says") for w in warnings):
+        # I may have read only part of the page: don't drop homes now, or they would
+        # come back as "new" on the next normal run
+        seen.update(listed_now)
+    else:
+        state["seen"] = listed_now
     save_state(state)
     print(f"{len(new)} new, {len(sent)} sent, {len(later)} for next run, {len(pricey)} over budget")
     return 0
