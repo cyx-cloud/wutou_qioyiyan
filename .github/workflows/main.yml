@@ -65,10 +65,20 @@ jobs:
         env:
           WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          TELEGRAM_USER: ${{ secrets.TELEGRAM_USER }}
           TEST: ${{ inputs.test }}
         run: |
           pip install --quiet requests
           python rental_monitor.py
+
+      - name: Keep the page if Codomo changed its layout
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codomo-page-${{ github.run_id }}
+          path: debug_page.html
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Save seen homes
         if: steps.reach.outputs.ok == 'true' || inputs.attempt == '4'
