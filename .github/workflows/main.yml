@@ -26,7 +26,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
 
@@ -65,7 +65,10 @@ jobs:
         env:
           WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
-          TELEGRAM_USER: ${{ secrets.TELEGRAM_USER }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
+          CALL_TO: ${{ secrets.CALL_TO }}
           TEST: ${{ inputs.test }}
         run: |
           pip install --quiet requests
