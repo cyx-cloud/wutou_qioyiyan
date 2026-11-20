@@ -6,7 +6,8 @@ message per new home with basic rent <= MAX_RENT. A home that disappears and com
 back later counts as new again.
 
 Env:
-  WHATSAPP_PHONE, CALLMEBOT_APIKEY   CallMeBot (required unless DRY_RUN=1)
+  WHATSAPP_PHONE, CALLMEBOT_APIKEY   CallMeBot WhatsApp (required unless DRY_RUN=1)
+  TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM, CALL_TO   Twilio phone call
   DRY_RUN=1                          print messages instead of sending
   LOCAL_HTML=path[.gz]               read this saved page instead of codomo.eu (testing)
 """
@@ -307,29 +308,61 @@ def send(text: str) -> None:
 
 
 def call(text: str) -> str | None:
-    """Telegram voice call through CallMeBot (free). Returns a problem text, or None if OK.
-    Needs secret TELEGRAM_USER (@username) and /start sent once to @CallMeBot_txtbot."""
-    user = os.environ.get("TELEGRAM_USER", "").strip()
-    if not user:
-        return "no TELEGRAM_USER secret"
-    if not user.startswith(("@", "+")):
-        user = "@" + user
-    text = text[:250]    # CallMeBot cuts at 256 characters
+    """Real phone call through Twilio. Returns a problem text, or None if OK.
+    Needs secrets TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM (your Twilio number)
+    and CALL_TO (your phone, like +31612345678; falls back to WHATSAPP_PHONE).
+    An unanswered call costs nothing; it stops ringing after CALL_RING_SECONDS, before
+    voicemail picks up (voicemail would count as answered and cost money)."""
+    sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+    token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+    from_ = os.environ.get("TWILIO_FROM", "").strip()
+    to = (os.environ.get("CALL_TO") or os.environ.get("WHATSAPP_PHONE", "")).strip()
+    missing = [n for n, v in [("TWILIO_ACCOUNT_SID", sid), ("TWILIO_AUTH_TOKEN", token),
+                              ("TWILIO_FROM", from_), ("CALL_TO", to)] if not v]
+    if missing:
+        return "missing secret " + ", ".join(missing)
     if os.environ.get("DRY_RUN") == "1":
-        print(f"----- Telegram call (dry run) -----\n{text}\n-----------------------------------")
+        print(f"----- Phone call (dry run) -----\n{text}\n--------------------------------")
         return None
-    # Never print the URL or the answer: they contain the username (public logs).
+    say = (text.replace("&", " and ").replace("<", " ").replace(">", " "))
+    twiml = (f'<Response><Say language="en-GB">{say}</Say><Pause length="1"/>'
+             f'<Say language="en-GB">{say}</Say></Response>')
+    base = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Calls"
+    # Never print the request or Twilio's answer: they contain your phone number
+    # (public logs). Problems go only to your own WhatsApp.
     try:
-        r = requests.get("https://api.callmebot.com/start.php",
-                         params={"user": user, "text": text, "rpt": 2, "cc": "no",
-                                 "timeout": 30},
-                         timeout=60)
+        r = requests.post(f"{base}.json", auth=(sid, token), timeout=20,
+                          data={"To": to, "From": from_, "Twiml": twiml,
+                                "Timeout": CALL_RING_SECONDS})
     except requests.RequestException as e:
-        return f"can't reach CallMeBot ({type(e).__name__})"
-    print(f"Telegram call: CallMeBot HTTP {r.status_code}")
-    if r.status_code != 200:
-        return f"CallMeBot answered HTTP {r.status_code}"
+        return f"can't reach Twilio ({type(e).__name__})"
+    print(f"Phone call: Twilio HTTP {r.status_code}")
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    if r.status_code != 201:
+        return f"Twilio said: {data.get('message') or 'HTTP ' + str(r.status_code)}"
+
+    # follow the call until it ends, to catch "failed" (wrong number etc.)
+    call_sid = data.get("sid")
+    status = data.get("status", "?")
+    for _ in range(CALL_RING_SECONDS // 5 + 12):
+        if status in ("completed", "busy", "no-answer", "failed", "canceled") or not call_sid:
+            break
+        time.sleep(5)
+        try:
+            status = requests.get(f"{base}/{call_sid}.json", auth=(sid, token),
+                                  timeout=20).json().get("status", status)
+        except (requests.RequestException, ValueError):
+            break
+    print(f"Phone call ended: {status}")
+    if status == "failed":
+        return "Twilio could not make the call (status failed)"
     return None
+
+
+CALL_RING_SECONDS = 20     # stop ringing before voicemail picks up
 
 
 def call_text(homes: list[codomo.Card]) -> str:
@@ -363,6 +396,9 @@ def test_run() -> int:
         send(f"🧪 Test failed\n⚠️ {p.text}")
         return 0
     cheap = sorted([c for c in homes if c.rent is not None and c.rent <= MAX_RENT], key=lambda c: c.rent)
+    print(f"TEST RUN (state.json not changed). Read {len(homes)} homes: "
+          + ", ".join(f"{c.key} {euro(c.rent)}" for c in homes))
+    print(f"{len(cheap)} with rent <= {euro(MAX_RENT)}")
     send("\n".join([f"🧪 Test, real data",
                     f"{plural(len(homes), 'home')} listed now",
                     f"{len(cheap)} with rent ≤ {euro(MAX_RENT)}"] + warnings))
@@ -376,8 +412,8 @@ def test_run() -> int:
              + home_text(c, places))
     problem = call("This is a test call from your rental monitor. "
                    + (call_text(cheap[:2]) if cheap else "No homes under budget right now."))
-    send("🧪 Telegram call sent, did it ring?" if not problem
-         else f"🧪 ⚠️ Telegram call failed\n{problem}")
+    send("🧪 Phone call made, did it ring?" if not problem
+         else f"🧪 ⚠️ Phone call failed\n{problem}")
     return 0
 
 
@@ -418,7 +454,7 @@ def main() -> int:
         send("\n".join(head + warnings))
 
     # CALL FIRST, before the slower work (home pages, map lookups, WhatsApp).
-    # The call runs in the background: CallMeBot may wait while the phone rings, and the
+    # The call runs in the background: the script follows the call while it rings, and the
     # WhatsApp details should not wait for that.
     to_send = cheap[:MAX_HOME_MESSAGES]
     call_result: dict = {}
@@ -444,11 +480,11 @@ def main() -> int:
         send("\n".join(extra_lines + [LIST_URL]))
 
     if caller is not None:
-        caller.join(timeout=90)
-        problem = call_result.get("problem", "no answer from CallMeBot in time")
+        caller.join(timeout=240)   # stop waiting after 4 min
+        problem = call_result.get("problem", "no answer from Twilio in time")
         if problem:
-            print(f"Telegram call failed: {problem}")
-            send(f"⚠️ Telegram call failed\n{problem}")
+            print("Phone call failed")    # details only on WhatsApp
+            send(f"⚠️ Phone call failed\n{problem}")
 
     # state.json keeps only the homes listed right now. A home that disappears is dropped,
     # so if it comes back later it counts as new and I get a message again.
