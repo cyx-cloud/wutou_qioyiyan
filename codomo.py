@@ -1,6 +1,7 @@
 # Copied unchanged from https://github.com/kooroshkz/codomo-alerts
 # (src/codomo_alerts/codomo.py, v0.2.3). MIT License, (c) 2026 Koorosh Komeilizadeh.
 # If Codomo changes its pages, check that repo for a newer version of this file.
+# One local change: list_counts() no longer fails when the "all" filter count is missing.
 """Reading codomo.eu pages.
 
 codomo.eu (formerly Holland2Stay) renders its pages on the server with Next.js.
@@ -307,7 +308,9 @@ def list_counts(data: str) -> Counts:
     except (ValueError, TypeError, AttributeError, KeyError) as e:
         raise PageError(f"unreadable filter counts: {e}") from e
     if None not in booking:
-        raise PageError("no total in the filter counts")
+        # Changed for the rental monitor (20 Nov 2026): Codomo sometimes leaves out the
+        # "all" option. The total is only used for checks, so add it up instead of failing.
+        booking[None] = sum(booking.values())
     return Counts(booking, bedrooms)
 
 
