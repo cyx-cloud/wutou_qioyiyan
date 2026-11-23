@@ -1,5 +1,10 @@
 {
  "problem": null,
- "seen": {},
+ "seen": {
+  "hoogstraat-39-02": {
+   "first": "2026-11-23T08:12",
+   "name": "Hoogstraat 39-02"
+  }
+ },
  "started": true
 }
