@@ -29,7 +29,7 @@ import codomo
 
 LIST_URL = "https://codomo.eu/homes/nl/en?city=eindhoven&publish_mode=direct_booking"
 SITE = "https://codomo.eu"
-MAX_RENT = 1200            # basic rent, without service costs
+MAX_RENT = 1100            # basic rent, without service costs
 MAX_HOME_MESSAGES = 5      # per run; more new homes -> one summary line
 PAGE_SIZE = 25             # Codomo shows 25 homes per list page
 MAX_PAGES = 6
@@ -112,8 +112,10 @@ def read_homes() -> tuple[list[codomo.Card], list[str]]:
 
     # the page's own number of book-directly homes; far off means I misread it
     expected = counts.booking.get("direct_booking") if counts else None
-    if expected is not None and (len(homes) > expected or (expected >= 4 and len(homes) < expected / 2)):
-        warnings.append(f"⚠️ Page says {expected} homes, I read {len(homes)}")
+    # More homes than the counter is normal: homes on hold for someone else's payment
+    # stay on the list but are not counted. Fewer means I may have missed some.
+    if expected is not None and len(homes) < expected:
+        warnings.append(f"⚠️ Page says {expected} homes, I read only {len(homes)}")
     not_direct = [c for c in homes if not c.direct]
     if not_direct:
         warnings.append(f"⚠️ {len(not_direct)} homes are not 'book directly'")
@@ -125,24 +127,51 @@ def read_homes() -> tuple[list[codomo.Card], list[str]]:
 
 # ---------------------------------------------------------------- booking conditions
 
-def condition_lines(c: codomo.Card) -> list[str]:
-    """Who can book (students / employed) and the energy label, from the home's own page
-    (one request per home that gets a message; robots.txt allows home pages)."""
+UNIT_CACHE: dict = {}
+_last_unit_fetch = [0.0]
+
+
+def fetch_unit(c: codomo.Card) -> dict:
+    """Who can book and the energy label, from the home's own page. Fetched once per home
+    per run (cached), so the call filter and the WhatsApp details share one request.
+    robots.txt allows home pages."""
+    if c.key in UNIT_CACHE:
+        return UNIT_CACHE[c.key]
+    info = {"who": None, "label": None, "error": None}
     try:
         local = os.environ.get("LOCAL_UNIT_HTML")
         if local:
             with gzip.open(local, "rt", encoding="utf-8") as f:
                 html = f.read()
         else:
-            time.sleep(2)
+            # no wait before the first page (speed), 1 s between pages (be polite)
+            wait = 1.0 - (time.time() - _last_unit_fetch[0])
+            if wait > 0:
+                time.sleep(wait)
             html = get_page(SITE + c.path)
+            _last_unit_fetch[0] = time.time()
         unit = codomo.parse_unit(html)
+        info["who"] = set(unit.audience)
+        info["label"] = energy_label(html)
     except (Problem, codomo.PageError) as e:
         print(f"Unit page failed for {c.name}: {e}")
+        info["error"] = str(e)
+    UNIT_CACHE[c.key] = info
+    return info
+
+
+def employed_only(c: codomo.Card) -> bool:
+    """True only when the home page clearly says employed only. Unknown -> False,
+    so a home is never skipped because a page could not be read."""
+    return fetch_unit(c)["who"] == {"employed"}
+
+
+def condition_lines(c: codomo.Card) -> list[str]:
+    info = fetch_unit(c)
+    if info["error"]:
         # the list card itself sometimes says "Students only"
         return ["⚠️ Booking conditions unknown"] + [f"ℹ️ {t}" for t in c.tags]
-
-    who = set(unit.audience)
+    who = info["who"]
     lines = []
     if who == {"student"}:
         lines.append("🎓 Students only")
@@ -154,8 +183,7 @@ def condition_lines(c: codomo.Card) -> list[str]:
         lines.append(f"👤 For: {', '.join(sorted(who))}")
     else:
         lines.append("⚠️ Who can book: not found")
-
-    label = energy_label(html)
+    label = info["label"]
     lines.append(f"⚡ Energy label {label}" if label else "⚠️ Energy label not found")
     return lines
 
@@ -249,6 +277,19 @@ def nice_day(iso: str) -> str:
         return datetime.strptime(iso, "%Y-%m-%d").strftime("%-d %b %Y")
     except ValueError:
         return iso or "?"
+
+
+def quick_text(c: codomo.Card) -> str:
+    """The first, fast message: only what the list page already says, plus the link."""
+    lines = ["🆕 New home", f"🏠 {c.name or c.key}"]
+    if c.rent is None:
+        lines.append("⚠️ Rent not found")
+    elif c.extra is not None:
+        lines.append(f"💶 {euro(c.rent)} + {euro(c.extra)} costs")
+    else:
+        lines.append(f"💶 {euro(c.rent)}/month")
+    lines.append(f"{SITE}{c.path}")
+    return "\n".join(lines)
 
 
 def home_text(c: codomo.Card, places: dict) -> str:
@@ -461,35 +502,54 @@ def main() -> int:
     cheap = [c for c in new if c.rent is None or c.rent <= MAX_RENT]   # unknown rent: show it
     pricey = [c for c in new if c.rent is not None and c.rent > MAX_RENT]
 
+    # Call filter, part 2: skip homes that are clearly "employed only" (I'm a student).
+    # Needs each home's own page (about 1 s per home), but that page is needed for the
+    # details anyway, so it is fetched once and reused.
+    to_send, employed, later = [], [], []
+    for c in cheap:
+        if len(to_send) >= MAX_HOME_MESSAGES:
+            later.append(c)          # not marked as seen, so they come in the next runs
+        elif employed_only(c):
+            employed.append(c)
+        else:
+            to_send.append(c)
+
     if first_run:
         head = [f"✅ Rental monitor started",
                 f"{len(homes)} homes listed now",
                 f"{len(cheap)} with rent ≤ {euro(MAX_RENT)}"]
         send("\n".join(head + warnings))
 
-    # CALL FIRST, before the slower work (home pages, map lookups, WhatsApp).
-    # The call runs in the background: the script follows the call while it rings, and the
-    # WhatsApp details should not wait for that.
-    to_send = cheap[:MAX_HOME_MESSAGES]
+    # 1) CALL FIRST. It runs in the background: the script follows the call while it rings,
+    #    and the WhatsApp messages should not wait for that.
     call_result: dict = {}
     caller = None
     if to_send and not first_run:
         caller = threading.Thread(target=lambda: call_result.update(problem=call(call_text(to_send))))
         caller.start()
 
+    # 2) Short message right away: everything already known from the list page + the link.
+    if not first_run:
+        for c in to_send:
+            send(quick_text(c))
+
     if warnings and new and not first_run:
         send("\n".join(["Rental monitor"] + warnings))
 
+    # 3) Full details a few seconds later (who can book, energy label, travel times).
     sent = []
     for c in to_send:
-        send(("🆕 New home\n" if not first_run else "") + home_text(c, state.setdefault("places", {})))
+        head = "📋 Details\n" if not first_run else ""
+        send(head + home_text(c, state.setdefault("places", {})))
         sent.append(c)
-    later = cheap[len(sent):]   # not marked as seen, so they come in the next runs
     extra_lines = []
     if later:
         extra_lines.append(f"➕ {plural(len(later), 'more home')} ≤ {euro(MAX_RENT)}, next check")
-    if pricey and not first_run:
-        extra_lines.append(f"➕ {plural(len(pricey), 'new home')} over {euro(MAX_RENT)}")
+    if not first_run:
+        if pricey:
+            extra_lines.append(f"➕ {plural(len(pricey), 'new home')} over {euro(MAX_RENT)}")
+        if employed:
+            extra_lines.append(f"➕ {plural(len(employed), 'new home')} for employed only")
     if extra_lines:
         send("\n".join(extra_lines + [LIST_URL]))
 
@@ -514,7 +574,8 @@ def main() -> int:
     else:
         state["seen"] = listed_now
     save_state(state)
-    print(f"{len(new)} new, {len(sent)} sent, {len(later)} for next run, {len(pricey)} over budget")
+    print(f"{len(new)} new, {len(sent)} sent, {len(later)} for next run, "
+          f"{len(pricey)} over budget, {len(employed)} employed only")
     return 0
 
 
