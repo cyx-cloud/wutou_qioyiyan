@@ -547,7 +547,18 @@ def main() -> int:
         extra_lines.append(f"➕ {plural(len(later), 'more home')} ≤ {euro(MAX_RENT)}, next check")
     if not first_run:
         if pricey:
-            extra_lines.append(f"➕ {plural(len(pricey), 'new home')} over {euro(MAX_RENT)}")
+            # not time-critical any more (call and details are out), so check their pages
+            # too, to say which ones are employed only (max 5 pages, to stay polite)
+            checked = pricey[:5]
+            n_emp = sum(1 for c in checked if employed_only(c))
+            line = f"➕ {plural(len(pricey), 'new home')} over {euro(MAX_RENT)}"
+            if n_emp == len(pricey):
+                line += ", employed only" if len(pricey) == 1 else ", all employed only"
+            elif n_emp:
+                line += f", {n_emp} of them employed only"
+            if len(pricey) > len(checked):
+                line += f" ({len(pricey) - len(checked)} not checked)"
+            extra_lines.append(line)
         if employed:
             extra_lines.append(f"➕ {plural(len(employed), 'new home')} for employed only")
     if extra_lines:
