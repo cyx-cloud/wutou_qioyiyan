@@ -1,4 +1,4 @@
-"""Magis monitor: WhatsApp + phone call when a studio at The General (Eindhoven) opens up.
+"""Magis monitor: Telegram (or WhatsApp) + phone call when a studio at The General (Eindhoven) opens up.
 
 Completely separate from the Codomo monitor:
   - its own workflow (.github/workflows/magis.yml), its own concurrency group
