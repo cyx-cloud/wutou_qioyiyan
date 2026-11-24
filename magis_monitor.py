@@ -39,7 +39,9 @@ MAX_RENT = 1100            # basic rent, same rule as for Codomo
 MAX_UNIT_PAGES = 15        # unit pages per run, to stay polite
 STATE_FILE = Path(__file__).with_name("magis_state.json")
 USER_AGENT = "personal-rental-monitor/1.0 (a few requests per run)"
-UNIT_LINK = re.compile(r'/for-rent/([a-z0-9-]+/[A-Za-z0-9-]+)')   # "the-general/28S"
+# "the-general/28S"; the unit part runs to the end of the link, so codes with dots,
+# underscores or more slashes (like "mister-x/9.04" or "the-city/Shared/3") are kept whole
+UNIT_LINK = re.compile(r'/for-rent/([a-z0-9-]+/[^"\'\s?#<>\\]+)')
 # names of Magis buildings; if none of them is on the overview page, the page changed
 KNOWN_NAMES = ("The General", "The City", "The Rumour", "The Garden", "Mister X")
 NOT_AVAILABLE = re.compile(r"currently not available", re.I)
@@ -78,7 +80,10 @@ def read_list() -> list[str]:
     """Units ("building/code") of the watched building on the overview page, in page order."""
     local = os.environ.get("LOCAL_LIST_HTML")
     html = Path(local).read_text(encoding="utf-8") if local else get_page(LIST_URL)
-    every = list(dict.fromkeys(UNIT_LINK.findall(html)))
+    every = list(dict.fromkeys(u.rstrip("/") for u in UNIT_LINK.findall(html)))
+    if os.environ.get("TEST") == "true":
+        # keep the page in a test run, so the workflow uploads it and I can see its links
+        Path(__file__).with_name("magis_debug_page.html").write_text(html, encoding="utf-8")
     b = watched_building()
     units = every if b == "all" else [u for u in every if u.split("/")[0] == b]
     print(f"Overview page links {len(every)} homes in total: {every or 'none'}")
@@ -95,7 +100,7 @@ def read_unit(unit: str) -> dict:
         html = Path(local_dir, f"{unit.split('/')[-1]}.html").read_text(encoding="utf-8")
     else:
         time.sleep(1)      # be polite
-        html = get_page(f"{SITE}/for-rent/{unit}")
+        html = get_page(f"{SITE}/for-rent/{unit}".replace("&amp;", "&"))
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"\s+", " ", text.replace("&nbsp;", " "))
     info = {"unit": unit, "available": not NOT_AVAILABLE.search(text),
@@ -127,6 +132,7 @@ def euro(x: float | None) -> str:
 
 def home_text(u: dict) -> str:
     building, code = u["unit"].split("/", 1)
+    code = code.replace("/", " ")
     lines = [f"🆕 Magis · {building.replace('-', ' ').title()}", f"🏠 Home {code}"]
     if u["rent"] is None:
         lines.append("⚠️ Rent not found")
@@ -204,7 +210,7 @@ def main() -> int:
                              f"Building: {watched_building()}",
                              f"{len(units)} homes of it on the overview page",
                              f"{len(found)} available now"]
-                            + ([f"⚠️ {len(failed)} unit pages failed"] if failed else [])))
+                            + ([f"⚠️ Pages failed: {', '.join(failed)}"] if failed else [])))
         for u in found[:2]:
             safe_send("🧪 Test\n" + home_text(u))
         return 0
