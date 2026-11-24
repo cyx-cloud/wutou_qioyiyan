@@ -1,4 +1,4 @@
-"""Codomo rental monitor: WhatsApp me (CallMeBot) when a new home appears.
+"""Codomo rental monitor: message me (Telegram, or CallMeBot WhatsApp) when a new home appears.
 
 Reads the Codomo list page in LIST_URL, keeps the homes listed right now in
 state.json (committed back to the repo by the workflow), and sends one WhatsApp
@@ -6,7 +6,8 @@ message per new home with basic rent <= MAX_RENT. A home that disappears and com
 back later counts as new again.
 
 Env:
-  WHATSAPP_PHONE, CALLMEBOT_APIKEY   CallMeBot WhatsApp (required unless DRY_RUN=1)
+  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   Telegram messages (used when both are set)
+  WHATSAPP_PHONE, CALLMEBOT_APIKEY   CallMeBot WhatsApp (fallback without Telegram secrets)
   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM, CALL_TO   Twilio phone call
   DRY_RUN=1                          print messages instead of sending
   LOCAL_HTML=path[.gz]               read this saved page instead of codomo.eu (testing)
@@ -331,6 +332,10 @@ def send(text: str) -> None:
         print(text)
         print("------------------------------")
         return
+    if os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and os.environ.get("TELEGRAM_CHAT_ID", "").strip():
+        send_telegram(text)
+        return
+    # No Telegram secrets yet: fall back to CallMeBot WhatsApp, as before.
     # The repo is public, so its Actions logs are public too. Never print the request URL or
     # CallMeBot's answer: both can contain the phone number (URL-encoded, so GitHub's
     # automatic *** masking of secrets would miss it).
@@ -346,6 +351,25 @@ def send(text: str) -> None:
     if not ok:
         raise RuntimeError("CallMeBot did not accept the message")
     time.sleep(3)   # CallMeBot drops messages sent too quickly after each other
+
+
+def send_telegram(text: str) -> None:
+    """Telegram bot message. Never print the URL: it contains the bot token."""
+    token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                          data={"chat_id": os.environ["TELEGRAM_CHAT_ID"].strip(), "text": text},
+                          timeout=30)
+    except requests.RequestException as e:
+        raise RuntimeError(f"Can't reach Telegram ({type(e).__name__})") from None
+    try:
+        ok = r.json().get("ok") is True
+    except ValueError:
+        ok = False
+    print(f"Telegram HTTP {r.status_code}, {'delivered' if ok else 'NOT delivered'}")
+    if not ok:
+        raise RuntimeError("Telegram did not accept the message")
+    time.sleep(1)   # Telegram: max about 1 message per second to one chat
 
 
 def call(text: str) -> str | None:
