@@ -39,8 +39,7 @@ MAX_RENT = 1100            # basic rent, same rule as for Codomo
 MAX_UNIT_PAGES = 15        # unit pages per run, to stay polite
 STATE_FILE = Path(__file__).with_name("magis_state.json")
 USER_AGENT = "personal-rental-monitor/1.0 (a few requests per run)"
-UNIT_LINK = re.compile(r'(?:https://magisrealestate\.com)?/for-rent/' + BUILDING + r'/([A-Za-z0-9-]+)')
-ANY_UNIT_LINK = re.compile(r'/for-rent/[a-z0-9-]+/[A-Za-z0-9-]+')
+UNIT_LINK = re.compile(r'/for-rent/([a-z0-9-]+/[A-Za-z0-9-]+)')   # "the-general/28S"
 # names of Magis buildings; if none of them is on the overview page, the page changed
 KNOWN_NAMES = ("The General", "The City", "The Rumour", "The Garden", "Mister X")
 NOT_AVAILABLE = re.compile(r"currently not available", re.I)
@@ -67,12 +66,23 @@ def get_page(url: str) -> str:
     return r.text
 
 
+def watched_building() -> str:
+    """the-general, except in a test run, where MAGIS_BUILDING can pick another building
+    (or "all") to check that reading Magis works while The General has nothing."""
+    if os.environ.get("TEST") == "true" and os.environ.get("MAGIS_BUILDING", "").strip():
+        return os.environ["MAGIS_BUILDING"].strip().lower()
+    return BUILDING
+
+
 def read_list() -> list[str]:
-    """Unit codes of The General on the overview page, in page order."""
+    """Units ("building/code") of the watched building on the overview page, in page order."""
     local = os.environ.get("LOCAL_LIST_HTML")
     html = Path(local).read_text(encoding="utf-8") if local else get_page(LIST_URL)
-    units = list(dict.fromkeys(UNIT_LINK.findall(html)))
-    if not units and not ANY_UNIT_LINK.search(html) and not any(n in html for n in KNOWN_NAMES):
+    every = list(dict.fromkeys(UNIT_LINK.findall(html)))
+    b = watched_building()
+    units = every if b == "all" else [u for u in every if u.split("/")[0] == b]
+    print(f"Overview page links {len(every)} homes in total: {every or 'none'}")
+    if not every and not any(n in html for n in KNOWN_NAMES):
         Path(__file__).with_name("magis_debug_page.html").write_text(html, encoding="utf-8")
         raise Problem("changed", "Magis overview page looks different, I can't read it")
     return units
@@ -82,10 +92,10 @@ def read_unit(unit: str) -> dict:
     """Facts from a unit's own page. Missing facts stay None, never a reason to skip."""
     local_dir = os.environ.get("LOCAL_UNIT_DIR")
     if local_dir:
-        html = Path(local_dir, f"{unit}.html").read_text(encoding="utf-8")
+        html = Path(local_dir, f"{unit.split('/')[-1]}.html").read_text(encoding="utf-8")
     else:
         time.sleep(1)      # be polite
-        html = get_page(f"{SITE}/for-rent/{BUILDING}/{unit}")
+        html = get_page(f"{SITE}/for-rent/{unit}")
     text = re.sub(r"<[^>]+>", " ", html)
     text = re.sub(r"\s+", " ", text.replace("&nbsp;", " "))
     info = {"unit": unit, "available": not NOT_AVAILABLE.search(text),
@@ -116,7 +126,8 @@ def euro(x: float | None) -> str:
 
 
 def home_text(u: dict) -> str:
-    lines = ["🆕 Magis · The General", f"🏠 Studio {u['unit']}"]
+    building, code = u["unit"].split("/", 1)
+    lines = [f"🆕 Magis · {building.replace('-', ' ').title()}", f"🏠 Home {code}"]
     if u["rent"] is None:
         lines.append("⚠️ Rent not found")
     else:
@@ -129,7 +140,7 @@ def home_text(u: dict) -> str:
         lines.append(f"📐 {size}")
     if u["students_only"]:
         lines.append("🎓 Students only")
-    lines.append(f"{SITE}/for-rent/{BUILDING}/{u['unit']}")
+    lines.append(f"{SITE}/for-rent/{u['unit']}")
     return "\n".join(lines)
 
 
@@ -185,12 +196,13 @@ def main() -> int:
             state["problem"] = p.kind
             save_state(state)
         return 0
-    print(f"The General on the overview page: {units or 'none'}")
+    print(f"Watching {watched_building()}: {units or 'none'}")
 
     if test:
         found, failed = available_units(units, set())
         safe_send("\n".join([f"🧪 Magis test, real data",
-                             f"{len(units)} The General links on the overview page",
+                             f"Building: {watched_building()}",
+                             f"{len(units)} homes of it on the overview page",
                              f"{len(found)} available now"]
                             + ([f"⚠️ {len(failed)} unit pages failed"] if failed else [])))
         for u in found[:2]:
@@ -216,7 +228,7 @@ def main() -> int:
     if cheap and not first_run:
         first = cheap[0]
         rent = f", {first['rent']:.0f} euro" if first["rent"] is not None else ""
-        say = (f"New Magis home at The General. Studio {first['unit']}{rent}. Check WhatsApp."
+        say = (f"New Magis home at The General. Number {first['unit'].split('/')[-1]}{rent}. Check WhatsApp."
                if len(cheap) == 1 else
                f"{len(cheap)} new Magis homes at The General. Check WhatsApp.")
         caller = threading.Thread(target=lambda: result.update(problem=call(say)))
