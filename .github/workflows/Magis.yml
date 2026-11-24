@@ -1,0 +1,87 @@
+name: Magis monitor
+
+# Separate from "Rental monitor" (Codomo): own concurrency group, and its state lives on
+# the branch "magis-state", so it never commits to main and can't get in Codomo's way.
+on:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Test: send what is listed now (state not changed)"
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    # Magis posts Wed + Fri around 11:00 Dutch time: every 10 min 9:00-12:59 UTC then.
+    # GitHub may start these late; add a cron-job.org job for exact timing.
+    - cron: "*/10 9-12 * * 3,5"
+    # the rest of the week, every 2 hours
+    - cron: "23 */2 * * *"
+
+permissions:
+  contents: write   # push magis_state.json to the magis-state branch
+
+concurrency:
+  group: magis-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load state from the magis-state branch
+        run: |
+          if git fetch -q origin magis-state 2>/dev/null; then
+            git show origin/magis-state:magis_state.json > magis_state.json || true
+          else
+            echo "No magis-state branch yet, first run"
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check The General
+        env:
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
+          CALL_TO: ${{ secrets.CALL_TO }}
+          TEST: ${{ inputs.test }}
+        run: |
+          pip install --quiet requests
+          python magis_monitor.py
+
+      - name: Keep the page if Magis changed its layout
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: magis-page-${{ github.run_id }}
+          path: magis_debug_page.html
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Save state to the magis-state branch
+        if: inputs.test != true && hashFiles('magis_state.json') != ''
+        run: |
+          cp magis_state.json /tmp/magis_state.json
+          git config user.name "magis-monitor"
+          git config user.email "magis-monitor@users.noreply.github.com"
+          if git rev-parse -q --verify origin/magis-state >/dev/null; then
+            git checkout -q -B magis-state origin/magis-state
+          else
+            git checkout -q --orphan magis-state
+            git rm -rq --cached . || true
+          fi
+          cp /tmp/magis_state.json magis_state.json
+          git add magis_state.json
+          if git diff --cached --quiet; then
+            echo "state unchanged"
+          else
+            git commit -qm "Update Magis state"
+            git push -q origin magis-state
+          fi
