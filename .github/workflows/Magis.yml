@@ -75,7 +75,9 @@ jobs:
       - name: Save state to the magis-state branch
         if: inputs.test != true && hashFiles('magis_state.json') != ''
         run: |
-          cp magis_state.json /tmp/magis_state.json
+          # move (not copy) the new state out of the way: an untracked magis_state.json
+          # here would block switching to the magis-state branch, which tracks that file
+          mv magis_state.json /tmp/magis_state.json
           git config user.name "magis-monitor"
           git config user.email "magis-monitor@users.noreply.github.com"
           if git rev-parse -q --verify origin/magis-state >/dev/null; then
