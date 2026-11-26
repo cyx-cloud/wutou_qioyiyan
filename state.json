@@ -7,6 +7,11 @@
   }
  },
  "problem": null,
- "seen": {},
+ "seen": {
+  "hoogstraat-39-20": {
+   "first": "2026-11-26T09:22",
+   "name": "Hoogstraat 39-20"
+  }
+ },
  "started": true
 }
