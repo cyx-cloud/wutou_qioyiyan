@@ -51,6 +51,8 @@ UNIT_LINK = re.compile(r'/for-rent/([a-z0-9-]+/[^"\'\s?#<>\\]+)')
 # names of Magis buildings; if none of them is on the overview page, the page changed
 KNOWN_NAMES = ("The General", "The City", "The Rumour", "The Garden", "Mister X")
 NOT_AVAILABLE = re.compile(r"currently not available", re.I)
+# the overview when nothing is for rent: "0 available residences", "No residences found"
+EMPTY_PAGE = re.compile(r"No residences found|\b0\s+available residences", re.I)
 # the home page shows its address as "Rijswijk, Verrijn Stuartlaan 2 F828"
 CITIES = ("Eindhoven", "Tilburg", "Rijswijk", "Amersfoort", "'s-Hertogenbosch", "Den Bosch",
           "Arnhem", "Delft", "Woerden", "Wageningen", "Capelle aan den IJssel")
@@ -103,6 +105,9 @@ def read_list() -> list[str]:
     units = every if b == "all" else [u for u in every if u.split("/")[0] == b]
     # (normal runs: all buildings; the city is only known from each home's own page)
     print(f"Overview page links {len(every)} homes in total: {every or 'none'}")
+    if not every and EMPTY_PAGE.search(html):
+        print("Magis says: no residences available right now")
+        return []
     if not every and not any(n in html for n in KNOWN_NAMES):
         Path(__file__).with_name("magis_debug_page.html").write_text(html, encoding="utf-8")
         raise Problem("changed", "Magis overview page looks different, I can't read it")
