@@ -7,6 +7,15 @@
   }
  },
  "problem": null,
- "seen": {},
+ "seen": {
+  "kastanjelaan-1-266": {
+   "first": "2026-11-26T06:52",
+   "name": "Kastanjelaan 1-266"
+  },
+  "victoriapark-472": {
+   "first": "2026-11-26T06:52",
+   "name": "Victoriapark 472"
+  }
+ },
  "started": true
 }
